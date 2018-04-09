@@ -15,6 +15,7 @@ import android.graphics.Canvas;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.RectF;
+import android.util.SparseArray;
 
 import android.util.DisplayMetrics;
 
@@ -42,7 +43,10 @@ public class RSSignatureCaptureView extends View {
 	private float mLastWidth;
 	private RectF mDirtyRect;
 
-	private List<TimedPoint> mPoints;
+	private SparseArray<List<TimedPoint>> mPointList = new SparseArray<>();
+	private SparseArray<Path> mPaths = new SparseArray<>();
+	private SparseArray<Float> mLastTouchesX = new SparseArray<>();
+	private SparseArray<Float> mLastTouchesY = new SparseArray<>();
 	private Paint mPaint = new Paint();
 	private Path mPath = new Path();
 	private Bitmap mSignatureBitmap = null;
@@ -115,12 +119,13 @@ public class RSSignatureCaptureView extends View {
 		clear();
 	}
 
-	private void addPoint(TimedPoint newPoint) {
+	private void addPoint(TimedPoint newPoint, Integer pointerId, List<TimedPoint> mPoints) {
 		mPoints.add(newPoint);
 		if (mPoints.size() > 2) {
 			// To reduce the initial lag make it work with 3 mPoints
 			// by copying the first point to the beginning.
-			if (mPoints.size() == 3) mPoints.add(0, mPoints.get(0));
+			if (mPoints.size() == 3)
+				mPoints.add(0, mPoints.get(0));
 
 			ControlTimedPoints tmp = calculateCurveControlPoints(mPoints.get(0), mPoints.get(1), mPoints.get(2));
 			TimedPoint c2 = tmp.c2;
@@ -134,8 +139,7 @@ public class RSSignatureCaptureView extends View {
 			float velocity = endPoint.velocityFrom(startPoint);
 			velocity = Float.isNaN(velocity) ? 0.0f : velocity;
 
-			velocity = mVelocityFilterWeight * velocity
-					+ (1 - mVelocityFilterWeight) * mLastVelocity;
+			velocity = mVelocityFilterWeight * velocity + (1 - mVelocityFilterWeight) * mLastVelocity;
 
 			// The new width is a function of the velocity. Higher velocities
 			// correspond to thinner strokes.
@@ -154,6 +158,7 @@ public class RSSignatureCaptureView extends View {
 			// so that we always have no more than 4 mPoints in mPoints array.
 			mPoints.remove(0);
 		}
+		mPointList.append(pointerId, mPoints);
 	}
 
 	private void addBezier(Bezier curve, float startWidth, float endWidth) {
@@ -192,8 +197,7 @@ public class RSSignatureCaptureView extends View {
 
 	private void ensureSignatureBitmap() {
 		if (mSignatureBitmap == null) {
-			mSignatureBitmap = Bitmap.createBitmap(getWidth(), getHeight(),
-					Bitmap.Config.ARGB_8888);
+			mSignatureBitmap = Bitmap.createBitmap(getWidth(), getHeight(), Bitmap.Config.ARGB_8888);
 			mSignatureBitmapCanvas = new Canvas(mSignatureBitmap);
 		}
 	}
@@ -239,54 +243,70 @@ public class RSSignatureCaptureView extends View {
 
 	@Override
 	public boolean onTouchEvent(MotionEvent event) {
-		if (!isEnabled() || event.getPointerCount() > 1 || (multipleTouchDragged && event.getAction() != MotionEvent.ACTION_UP)) {
-		    multipleTouchDragged = true;
+		// use last registered pointer
+		Integer pointerId = event.getPointerId(event.getActionIndex());
+		if (event.getPointerCount() > 1) {
+			pointerId = event.getPointerId(event.getPointerCount() - 1);
+		}
+		Integer pointerIndex = event.findPointerIndex(pointerId);
+		Float eventX = event.getX(pointerIndex);
+		Float eventY = event.getY(pointerIndex);
+		List<TimedPoint> points = mPointList.get(pointerId, null);
+
+		if (points == null) {
+			points = new ArrayList<>();
+			mPointList.append(pointerId, points);
+		}
+
+		switch (event.getActionMasked()) {
+		case MotionEvent.ACTION_DOWN:
+		case MotionEvent.ACTION_POINTER_DOWN:
+			mLastTouchesX.append(pointerId, eventX);
+			mLastTouchesY.append(pointerId, eventY);
+			getParent().requestDisallowInterceptTouchEvent(true);
+			points.clear();
+			mPointList.append(pointerId, points);
+
+			Path path = mPaths.get(pointerId, null);
+			if (path == null) {
+				path = new Path();
+			}
+
+			path.moveTo(eventX, eventY);
+			addPoint(new TimedPoint(eventX, eventY), pointerId, points);
+
+		case MotionEvent.ACTION_MOVE:
+			Float lastTouchX = mLastTouchesX.get(pointerId);
+			Float lastTouchY = mLastTouchesY.get(pointerId);
+			if ((Math.abs(lastTouchX - eventX) < SCROLL_THRESHOLD || Math.abs(lastTouchY - eventY) < SCROLL_THRESHOLD)
+					&& dragged) {
+				return false;
+			}
+
+			resetDirtyRect(eventX, eventY);
+			addPoint(new TimedPoint(eventX, eventY), pointerId, points);
+			dragged = true;
+			break;
+
+		case MotionEvent.ACTION_UP:
+		case MotionEvent.ACTION_POINTER_UP:
+			if (points.size() >= 3) {
+				resetDirtyRect(eventX, eventY);
+				addPoint(new TimedPoint(eventX, eventY), pointerId, points);
+				getParent().requestDisallowInterceptTouchEvent(true);
+				setIsEmpty(false);
+				sendDragEventToReact();
+			}
+			dragged = false;
+			break;
+
+		default:
 			return false;
 		}
 
-		float eventX = event.getX();
-		float eventY = event.getY();
-
-		switch (event.getAction()) {
-			case MotionEvent.ACTION_DOWN:
-                mLastTouchX = eventX;
-                mLastTouchY = eventY;
-				getParent().requestDisallowInterceptTouchEvent(true);
-				mPoints.clear();
-				mPath.moveTo(eventX, eventY);
-				addPoint(new TimedPoint(eventX, eventY));
-
-			case MotionEvent.ACTION_MOVE:
-                if((Math.abs(mLastTouchX - eventX) < SCROLL_THRESHOLD || Math.abs(mLastTouchY - eventY) < SCROLL_THRESHOLD) && dragged) {
-                    return false;
-                }
-				resetDirtyRect(eventX, eventY);
-				addPoint(new TimedPoint(eventX, eventY));
-                dragged = true;
-				break;
-
-			case MotionEvent.ACTION_UP:
-			    if(mPoints.size() >= 3) {
-                    resetDirtyRect(eventX, eventY);
-                    addPoint(new TimedPoint(eventX, eventY));
-                    getParent().requestDisallowInterceptTouchEvent(true);
-                    setIsEmpty(false);
-                    sendDragEventToReact();
-			    }
-                dragged = false;
-                multipleTouchDragged = false;
-				break;
-
-			default:
-				return false;
-		}
-
 		//invalidate();
-		invalidate(
-				(int) (mDirtyRect.left - mMaxWidth),
-				(int) (mDirtyRect.top - mMaxWidth),
-				(int) (mDirtyRect.right + mMaxWidth),
-				(int) (mDirtyRect.bottom + mMaxWidth));
+		invalidate((int) (mDirtyRect.left - mMaxWidth), (int) (mDirtyRect.top - mMaxWidth),
+				(int) (mDirtyRect.right + mMaxWidth), (int) (mDirtyRect.bottom + mMaxWidth));
 
 		return true;
 	}
@@ -355,10 +375,10 @@ public class RSSignatureCaptureView extends View {
 
 	public void clear() {
 		dragged = false;
-		mPoints = new ArrayList<TimedPoint>();
+		mPointList = new SparseArray<>();
+		mPaths = new SparseArray<>();
 		mLastVelocity = 0;
 		mLastWidth = (mMinWidth + mMaxWidth) / 2;
-		mPath.reset();
 
 		if (mSignatureBitmap != null) {
 			mSignatureBitmap = null;
@@ -370,8 +390,8 @@ public class RSSignatureCaptureView extends View {
 		invalidate();
 	}
 
-	private int convertDpToPx(float dp){
-		return Math.round(dp*(getResources().getDisplayMetrics().xdpi/ DisplayMetrics.DENSITY_DEFAULT));
+	private int convertDpToPx(float dp) {
+		return Math.round(dp * (getResources().getDisplayMetrics().xdpi / DisplayMetrics.DENSITY_DEFAULT));
 	}
 
 	public interface OnSignedListener {
