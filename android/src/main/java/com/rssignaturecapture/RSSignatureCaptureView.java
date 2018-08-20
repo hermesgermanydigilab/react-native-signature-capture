@@ -278,8 +278,8 @@ public class RSSignatureCaptureView extends View {
 		case MotionEvent.ACTION_MOVE:
 			Float lastTouchX = mLastTouchesX.get(pointerId);
 			Float lastTouchY = mLastTouchesY.get(pointerId);
-			if ((Math.abs(lastTouchX - eventX) < SCROLL_THRESHOLD || Math.abs(lastTouchY - eventY) < SCROLL_THRESHOLD)
-					&& dragged) {
+			if ((lastTouchX == null || lastTouchY == null) || (Math.abs(lastTouchX - eventX) < SCROLL_THRESHOLD || Math.abs(lastTouchY - eventY) < SCROLL_THRESHOLD)
+							&& dragged) {
 				return false;
 			}
 
